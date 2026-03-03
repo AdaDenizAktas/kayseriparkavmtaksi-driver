@@ -7,7 +7,7 @@ const STORAGE_KEY = "kpt_driver_lang";
 
 const DICT = {
   // Brand / header
-  "brand.name": { tr: "KayseriPark AVM Taksi", en: "KayseriPark AVM Taxi" },
+  "brand.name": { tr: "KayseriPark AVM Taksi", en: "KayseriPark AVM Taksi" },
   "brand.driver": { tr: "Sürücü", en: "Driver" },
 
   // Language

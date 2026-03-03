@@ -338,10 +338,24 @@ function statusPillClass(s: string) {
             <span class="badge">{{ t("brand.driver") }}</span>
           </div>
 
-          <div class="langSwitch" aria-label="Language">
-            <button :class="{ active: lang === 'tr' }" @click="setLang('tr')">{{ t("lang.tr") }}</button>
-            <button :class="{ active: lang === 'en' }" @click="setLang('en')">{{ t("lang.en") }}</button>
-          </div>
+          <!-- App.vue — replace ONLY this langSwitch block -->
+<div class="langSwitch" aria-label="Language" style="display:flex; align-items:center; gap:10px;">
+  <!-- EN on the left -->
+  <button :class="{ active: lang === 'en' }" @click="setLang('en')">
+    {{ t("lang.en") }}
+  </button>
+
+  <!-- flags in the middle: EN left, TR right -->
+  <span aria-hidden="true" style="display:flex; align-items:center; gap:6px; line-height:1;">
+    <span style="font-size:18px;">🇬🇧</span>
+    <span style="font-size:18px;">🇹🇷</span>
+  </span>
+
+  <!-- TR on the right -->
+  <button :class="{ active: lang === 'tr' }" @click="setLang('tr')">
+    {{ t("lang.tr") }}
+  </button>
+</div>
         </div>
       </div>
     </header>
