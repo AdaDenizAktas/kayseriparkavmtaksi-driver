@@ -339,21 +339,34 @@ function statusPillClass(s: string) {
           </div>
 
           <!-- App.vue — replace ONLY this langSwitch block -->
+<!-- REPLACE ONLY the langSwitch block with this -->
 <div class="langSwitch" aria-label="Language" style="display:flex; align-items:center; gap:10px;">
-  <!-- EN on the left -->
-  <button :class="{ active: lang === 'en' }" @click="setLang('en')">
-    {{ t("lang.en") }}
-  </button>
-
-  <!-- flags in the middle: EN left, TR right -->
-  <span aria-hidden="true" style="display:flex; align-items:center; gap:6px; line-height:1;">
-    <span style="font-size:18px;">🇬🇧</span>
-    <span style="font-size:18px;">🇹🇷</span>
-  </span>
-
-  <!-- TR on the right -->
+  <!-- TR on the left -->
   <button :class="{ active: lang === 'tr' }" @click="setLang('tr')">
     {{ t("lang.tr") }}
+  </button>
+
+  <!-- Flags in the middle: TR flag (right of TR) + EN flag (left of EN) -->
+  <span aria-hidden="true" style="display:flex; align-items:center; gap:6px; line-height:1;">
+    <img
+      src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/1f1f9-1f1f7.svg"
+      alt="TR"
+      width="18"
+      height="18"
+      style="display:block;"
+    />
+    <img
+      src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/1f1ec-1f1e7.svg"
+      alt="EN"
+      width="18"
+      height="18"
+      style="display:block;"
+    />
+  </span>
+
+  <!-- EN on the right -->
+  <button :class="{ active: lang === 'en' }" @click="setLang('en')">
+    {{ t("lang.en") }}
   </button>
 </div>
         </div>
