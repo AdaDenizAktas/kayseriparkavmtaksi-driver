@@ -1,4 +1,4 @@
-<!-- src/App.vue  (polish UI + i18n; functionality preserved) -->
+<!-- src/App.vue  (FULL) -->
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watchEffect } from "vue";
 import {
@@ -51,27 +51,29 @@ const statusMsg = ref("");
 const plateKeyInput = computed(() => plateKeyOf(plate.value.trim()));
 
 const gpsOn = ref(false);
-const lastPos = ref<{ lat: number; lng: number; ts: number } | null>(null);
+const lastPos = ref<{ lat: number; lng: number; acc: number; ts: number } | null>(null);
+
+// ===== GPS precision tuning (web) =====
+const GPS_TARGET_ACCURACY_M = 20;      // good fix
+const GPS_FALLBACK_ACCURACY_M = 50000; // allow very coarse indoors so RTDB isn't empty
+const GPS_MIN_MOVE_M = 10;
+const GPS_HEARTBEAT_MS = 10000;        // keep RTDB ts fresh even if watchPosition stops firing
+const GPS_MAX_AGE_MS = 0;
+const GPS_TIMEOUT_MS = 20000;
 
 const bookings = ref<Booking[]>([]);
 let unsubBookings: (() => void) | null = null;
 let unsubVehicle: (() => void) | null = null;
 
 let watchId: number | null = null;
+let hbTimer: number | null = null;
 let lastSent = 0;
-
-// App.vue
 
 function keyFromUser(u: User) {
   const e = (u.email || "").trim();
   const raw = (e.split("@")[0] || "").trim();
-
-  // IMPORTANT: Firebase Auth may normalize emails to lowercase.
-  // Your Firestore doc IDs + vehiclePrivate IDs are uppercase plateKeys (e.g. 38ABC123),
-  // so we must normalize here to match those IDs.
   return plateKeyOf(raw) || raw.toUpperCase();
 }
-
 
 function detachBookings() {
   unsubBookings?.();
@@ -131,6 +133,12 @@ function attachVehicle() {
 
 function stopGps() {
   gpsOn.value = false;
+
+  if (hbTimer != null) {
+    clearInterval(hbTimer);
+    hbTimer = null;
+  }
+
   if (watchId != null) {
     navigator.geolocation.clearWatch(watchId);
     watchId = null;
@@ -193,7 +201,21 @@ async function applyDriverStatus() {
   }
 }
 
-async function pushLocation(lat: number, lng: number) {
+function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const R = 6371000;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLon = ((b.lng - a.lng) * Math.PI) / 180;
+  const la1 = (a.lat * Math.PI) / 180;
+  const la2 = (b.lat * Math.PI) / 180;
+
+  const x =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
+
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(x)));
+}
+
+async function pushLocation(lat: number, lng: number, acc: number) {
   if (!user.value || !driverKey.value) return;
 
   const now = Date.now();
@@ -203,6 +225,7 @@ async function pushLocation(lat: number, lng: number) {
   await rset(rref(rtdb, `liveLocations/${driverKey.value}`), {
     lat,
     lng,
+    acc,
     ts: now,
     status: serverStatus.value,
     uid: user.value.uid,
@@ -210,6 +233,8 @@ async function pushLocation(lat: number, lng: number) {
 }
 
 function startGps() {
+  err.value = "";
+
   if (!navigator.geolocation) {
     err.value = t("gps.noSupport");
     return;
@@ -217,23 +242,65 @@ function startGps() {
   if (watchId != null) return;
 
   gpsOn.value = true;
+
+  // Heartbeat: keep RTDB 'ts' fresh even if watchPosition pauses indoors
+  if (hbTimer == null) {
+    hbTimer = window.setInterval(async () => {
+      if (!gpsOn.value) return;
+      const p = lastPos.value;
+      if (!p) return;
+      try {
+        await pushLocation(p.lat, p.lng, p.acc);
+      } catch (e: any) {
+        err.value = e?.message || t("gps.sendFail");
+      }
+    }, GPS_HEARTBEAT_MS);
+  }
+
+  // Warm-up (best-effort)
+  navigator.geolocation.getCurrentPosition(
+    () => {},
+    () => {},
+    { enableHighAccuracy: true, maximumAge: GPS_MAX_AGE_MS, timeout: GPS_TIMEOUT_MS }
+  );
+
   watchId = navigator.geolocation.watchPosition(
     async (pos) => {
       const lat = pos.coords.latitude;
       const lng = pos.coords.longitude;
-      const ts = Date.now();
-      lastPos.value = { lat, lng, ts };
+      const acc = Number.isFinite(pos.coords.accuracy) ? pos.coords.accuracy : 999999;
+
+      const prev = lastPos.value;
+
+      // Allow coarse fixes so RTDB isn't empty indoors
+      if (acc > GPS_FALLBACK_ACCURACY_M) return;
+
+      const now = Date.now();
+      const moved = prev ? haversineMeters({ lat: prev.lat, lng: prev.lng }, { lat, lng }) : 999999;
+      const improved = prev ? acc < prev.acc * 0.7 : true;
+      const isGood = acc <= GPS_TARGET_ACCURACY_M;
+      const due = now - lastSent >= GPS_HEARTBEAT_MS;
+
+      if (isGood) {
+        if (moved < GPS_MIN_MOVE_M && !improved && !due) return;
+      } else {
+        // coarse fix: only allow on heartbeat cadence to avoid spam
+        if (!due) return;
+      }
+
+      lastPos.value = { lat, lng, acc, ts: now };
+
       try {
-        await pushLocation(lat, lng);
+        await pushLocation(lat, lng, acc);
       } catch (e: any) {
         err.value = e?.message || t("gps.sendFail");
       }
     },
     (e) => {
       err.value = e.message || "GPS error";
-      gpsOn.value = false;
+      stopGps(); // ensures watch + heartbeat stop
     },
-    { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
+    { enableHighAccuracy: true, maximumAge: GPS_MAX_AGE_MS, timeout: GPS_TIMEOUT_MS }
   );
 }
 
@@ -275,7 +342,6 @@ onMounted(() => {
       return;
     }
 
-    // Driver app must only allow @drivers.local accounts
     const email = (u.email || "").toLowerCase();
     if (!email.endsWith("@drivers.local")) {
       await signOut(auth);
@@ -338,41 +404,37 @@ function statusPillClass(s: string) {
             <span class="badge">{{ t("brand.driver") }}</span>
           </div>
 
-          <!-- App.vue — replace ONLY this langSwitch block -->
-<!-- App.vue — replace ONLY the langSwitch block with this -->
-<div class="langSwitch" aria-label="Language" style="display:flex; align-items:center; gap:10px;">
-  <!-- TR (left) -->
-  <button
-    :class="{ active: lang === 'tr' }"
-    @click="setLang('tr')"
-    style="display:inline-flex; align-items:center; gap:8px;"
-  >
-    <span>{{ t("lang.tr") }}</span>
-    <img
-      src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/1f1f9-1f1f7.svg"
-      alt="TR"
-      width="18"
-      height="18"
-      style="display:block;"
-    />
-  </button>
+          <div class="langSwitch" aria-label="Language" style="display:flex; align-items:center; gap:10px;">
+            <button
+              :class="{ active: lang === 'tr' }"
+              @click="setLang('tr')"
+              style="display:inline-flex; align-items:center; gap:8px;"
+            >
+              <span>{{ t("lang.tr") }}</span>
+              <img
+                src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/1f1f9-1f1f7.svg"
+                alt="TR"
+                width="18"
+                height="18"
+                style="display:block;"
+              />
+            </button>
 
-  <!-- EN (right) -->
-  <button
-    :class="{ active: lang === 'en' }"
-    @click="setLang('en')"
-    style="display:inline-flex; align-items:center; gap:8px;"
-  >
-    <img
-      src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/1f1ec-1f1e7.svg"
-      alt="EN"
-      width="18"
-      height="18"
-      style="display:block;"
-    />
-    <span>{{ t("lang.en") }}</span>
-  </button>
-</div>
+            <button
+              :class="{ active: lang === 'en' }"
+              @click="setLang('en')"
+              style="display:inline-flex; align-items:center; gap:8px;"
+            >
+              <img
+                src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/1f1ec-1f1e7.svg"
+                alt="EN"
+                width="18"
+                height="18"
+                style="display:block;"
+              />
+              <span>{{ t("lang.en") }}</span>
+            </button>
+          </div>
         </div>
       </div>
     </header>
@@ -382,19 +444,20 @@ function statusPillClass(s: string) {
         <div class="grid" style="gap:12px;">
           <div class="card">
             <div class="cardPad grid" style="gap:6px;">
-              <div style="font-weight: 1000; font-size: 18px;">{{ t("brand.driver") }}</div>
-              <!-- <div class="small">{{ t("login.hint") }}</div> -->
+              <div style="font-weight: 1000; font-size: 18px;">
+                {{ t("brand.driver") }}
+              </div>
             </div>
           </div>
 
-        <div v-if="!user" class="card loginCard">
-          <div class="cardPad grid" style="gap:10px;">
-            <input class="input" v-model="plate" :placeholder="t('login.plate')" />
-            <input class="input" v-model="password" type="password" :placeholder="t('login.pass')" />
-            <button class="btn btnBrand" @click="login">{{ t("login.btn") }}</button>
-            <div v-if="err" style="color: var(--bad); font-weight: 900;">{{ err }}</div>
+          <div v-if="!user" class="card loginCard">
+            <div class="cardPad grid" style="gap:10px;">
+              <input class="input" v-model="plate" :placeholder="t('login.plate')" />
+              <input class="input" v-model="password" type="password" :placeholder="t('login.pass')" />
+              <button class="btn btnBrand" @click="login">{{ t("login.btn") }}</button>
+              <div v-if="err" style="color: var(--bad); font-weight: 900;">{{ err }}</div>
+            </div>
           </div>
-        </div>      
 
           <template v-else>
             <div class="grid2">
@@ -405,7 +468,10 @@ function statusPillClass(s: string) {
                       <div style="font-weight: 1000; font-size: 18px;">
                         {{ driverKey || "(" + t("session.plateKey") + ")" }}
                       </div>
-                      <div class="small">{{ t("session.uid") }}: <span class="mono" style="font-weight: 900;">{{ user.uid }}</span></div>
+                      <div class="small">
+                        {{ t("session.uid") }}:
+                        <span class="mono" style="font-weight: 900;">{{ user.uid }}</span>
+                      </div>
                     </div>
                     <button class="btn" @click="logout">{{ t("session.logout") }}</button>
                   </div>
@@ -416,7 +482,11 @@ function statusPillClass(s: string) {
                     <div class="row" style="justify-content: space-between;">
                       <div style="font-weight: 950;">{{ t("status.title") }}</div>
                       <span class="pill" :class="serverStatus === 'available' ? 'pillOk' : (serverStatus === 'busy' ? 'pillWarn' : '')">
-                        {{ serverStatus === 'available' ? t("status.available") : (serverStatus === 'busy' ? t("status.busy") : t("status.offline")) }}
+                        {{
+                          serverStatus === 'available'
+                            ? t("status.available")
+                            : (serverStatus === 'busy' ? t("status.busy") : t("status.offline"))
+                        }}
                       </span>
                     </div>
 
@@ -461,7 +531,9 @@ function statusPillClass(s: string) {
                       </button>
 
                       <span class="small" v-if="lastPos">
-                        {{ t("gps.last") }}: <b>{{ lastPos.lat.toFixed(5) }}, {{ lastPos.lng.toFixed(5) }}</b>
+                        {{ t("gps.last") }}:
+                        <b>{{ lastPos.lat.toFixed(5) }}, {{ lastPos.lng.toFixed(5) }}</b>
+                        • <span class="mono">{{ Math.round(lastPos.acc) }}m</span>
                       </span>
                     </div>
                   </div>
